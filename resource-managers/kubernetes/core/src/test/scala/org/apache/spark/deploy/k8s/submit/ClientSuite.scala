@@ -17,12 +17,12 @@
 package org.apache.spark.deploy.k8s.submit
 
 import io.fabric8.kubernetes.api.model._
-import io.fabric8.kubernetes.client.{KubernetesClient, Watch}
+import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.dsl.PodResource
+import io.fabric8.kubernetes.client.informers.{SharedIndexInformer, SharedInformerFactory}
 import org.mockito.{ArgumentCaptor, Mock, MockitoAnnotations}
 import org.mockito.Mockito.{verify, when}
 import org.scalatest.BeforeAndAfter
-import org.scalatestplus.mockito.MockitoSugar._
 
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.deploy.k8s._
@@ -112,6 +112,12 @@ class ClientSuite extends SparkFunSuite with BeforeAndAfter {
   private var namedPods: PodResource[Pod, DoneablePod] = _
 
   @Mock
+  private var sharedInformerFactory: SharedInformerFactory = _
+
+  @Mock
+  private var podInformer: SharedIndexInformer[Pod] = _
+
+  @Mock
   private var loggingPodStatusWatcher: LoggingPodStatusWatcher = _
 
   @Mock
@@ -135,7 +141,9 @@ class ClientSuite extends SparkFunSuite with BeforeAndAfter {
     createdPodArgumentCaptor = ArgumentCaptor.forClass(classOf[Pod])
     createdResourcesArgumentCaptor = ArgumentCaptor.forClass(classOf[HasMetadata])
     when(podOperations.create(FULL_EXPECTED_POD)).thenReturn(POD_WITH_OWNER_REFERENCE)
-    when(namedPods.watch(loggingPodStatusWatcher)).thenReturn(mock[Watch])
+    when(kubernetesClient.informers()).thenReturn(sharedInformerFactory)
+    when(sharedInformerFactory.sharedIndexInformerFor(classOf[Pod], classOf[PodList], 60000))
+      .thenReturn(podInformer)
     doReturn(resourceList)
       .when(kubernetesClient)
       .resourceList(createdResourcesArgumentCaptor.capture())
@@ -181,6 +189,6 @@ class ClientSuite extends SparkFunSuite with BeforeAndAfter {
       kubernetesClient,
       loggingPodStatusWatcher)
     submissionClient.run()
-    verify(loggingPodStatusWatcher).watchOrStop(kconf.namespace + ":driver")
+    verify(loggingPodStatusWatcher).watchOrStop("driver", kconf.namespace)
   }
 }

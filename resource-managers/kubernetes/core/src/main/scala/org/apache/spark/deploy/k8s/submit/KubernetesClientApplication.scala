@@ -127,11 +127,14 @@ private[spark] class Client(
         .endSpec()
       .build()
     val driverPodName = resolvedDriverPod.getMetadata.getName
-    Utils.tryWithResource(
-      kubernetesClient
-        .pods()
-        .withName(driverPodName)
-        .watch(watcher)) { _ =>
+    val informers = kubernetesClient.informers()
+    // Probably need to make resyncPeriodInMillis configurable see
+    // explanation here on what it means:
+    // https://groups.google.com/g/kubernetes-sig-api-machinery/c/PbSCXdLDno0?pli=1
+    val podInformer = informers.sharedIndexInformerFor(classOf[Pod], classOf[PodList], 60000)
+    podInformer.addEventHandler(watcher)
+    informers.startAllRegisteredInformers()
+    try {
       val createdDriverPod = kubernetesClient.pods().create(resolvedDriverPod)
       try {
         val otherKubernetesResources =
@@ -144,8 +147,9 @@ private[spark] class Client(
           throw e
       }
 
-      val sId = Seq(conf.namespace, driverPodName).mkString(":")
-      watcher.watchOrStop(sId)
+      watcher.watchOrStop(driverPodName, conf.namespace)
+    } finally {
+      informers.stopAllRegisteredInformers()
     }
   }
 

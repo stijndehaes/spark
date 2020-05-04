@@ -17,16 +17,15 @@
 package org.apache.spark.deploy.k8s.submit
 
 import io.fabric8.kubernetes.api.model.Pod
-import io.fabric8.kubernetes.client.{KubernetesClientException, Watcher}
-import io.fabric8.kubernetes.client.Watcher.Action
+import io.fabric8.kubernetes.client.informers.ResourceEventHandler
 
 import org.apache.spark.deploy.k8s.Config._
 import org.apache.spark.deploy.k8s.KubernetesDriverConf
 import org.apache.spark.deploy.k8s.KubernetesUtils._
 import org.apache.spark.internal.Logging
 
-private[k8s] trait LoggingPodStatusWatcher extends Watcher[Pod] {
-  def watchOrStop(submissionId: String): Unit
+private[k8s] trait LoggingPodStatusWatcher extends ResourceEventHandler[Pod] {
+  def watchOrStop(podName: String, podNamespace: String): Unit
 }
 
 /**
@@ -43,30 +42,47 @@ private[k8s] class LoggingPodStatusWatcherImpl(conf: KubernetesDriverConf)
   private var podCompleted = false
 
   private var pod = Option.empty[Pod]
+  private var podName = Option.empty[String]
+  private var podNamespace = Option.empty[String]
 
   private def phase: String = pod.map(_.getStatus.getPhase).getOrElse("unknown")
 
-  override def eventReceived(action: Action, pod: Pod): Unit = {
-    this.pod = Option(pod)
-    action match {
-      case Action.DELETED | Action.ERROR =>
-        closeWatch()
+  def isDriverPod(pod: Pod): Boolean = {
+    (podName.isDefined && podNamespace.isDefined && pod.getMetadata.getName == podName.get
+      && pod.getMetadata.getNamespace == podNamespace.get)
+  }
 
-      case _ =>
-        logLongStatus()
-        if (hasCompleted()) {
-          closeWatch()
-        }
+  def updateStatus(pod: Pod): Unit = {
+    if (isDriverPod(pod)) {
+      this.pod = Some(pod)
+      logLongStatus()
+      if (hasCompleted()) {
+        closeWatch()
+      }
     }
   }
 
-  override def onClose(e: KubernetesClientException): Unit = {
-    logDebug(s"Stopping watching application $appId with last-observed phase $phase")
-    closeWatch()
+  def onAdd(pod: Pod) {
+    updateStatus(pod)
+  }
+
+  def onUpdate(oldObj: Pod, pod: Pod) {
+    updateStatus(pod)
+  }
+
+  def onDelete(pod: Pod, deletedFinalStateUnknown: Boolean): Unit = {
+    if (isDriverPod(pod)) {
+      this.pod = Some(pod)
+      closeWatch()
+    }
   }
 
   private def logLongStatus(): Unit = {
-    logInfo("State changed, new state: " + pod.map(formatPodState).getOrElse("unknown"))
+    logInfo(
+      "State changed, new state: " + pod
+        .map(formatPodState)
+        .getOrElse("unknown")
+    )
   }
 
   private def hasCompleted(): Boolean = {
@@ -78,20 +94,33 @@ private[k8s] class LoggingPodStatusWatcherImpl(conf: KubernetesDriverConf)
     this.notifyAll()
   }
 
-  override def watchOrStop(sId: String): Unit = if (conf.get(WAIT_FOR_APP_COMPLETION)) {
-    logInfo(s"Waiting for application ${conf.appName} with submission ID $sId to finish...")
-    val interval = conf.get(REPORT_INTERVAL)
-    synchronized {
-      while (!podCompleted) {
-        wait(interval)
-        logInfo(s"Application status for $appId (phase: $phase)")
+  override def watchOrStop(podName: String, podNamespace: String): Unit = {
+    val sId = Seq(conf.namespace, podName).mkString(":")
+    this.podName = Some(podName)
+    this.podNamespace = Some(podNamespace)
+    if (conf.get(WAIT_FOR_APP_COMPLETION)) {
+      logInfo(
+        s"Waiting for application ${conf.appName} with submission ID $sId to finish..."
+      )
+      val interval = conf.get(REPORT_INTERVAL)
+      synchronized {
+        while (!podCompleted) {
+          wait(interval)
+          logInfo(s"Application status for $appId (phase: $phase)")
+        }
       }
+      logInfo(
+        pod
+          .map { p =>
+            s"Container final statuses:\n\n${containersDescription(p)}"
+          }
+          .getOrElse("No containers were found in the driver pod.")
+      )
+      logInfo(s"Application ${conf.appName} with submission ID $sId finished")
+    } else {
+      logInfo(
+        s"Deployed Spark application ${conf.appName} with submission ID $sId into Kubernetes"
+      )
     }
-    logInfo(
-      pod.map { p => s"Container final statuses:\n\n${containersDescription(p)}" }
-        .getOrElse("No containers were found in the driver pod."))
-    logInfo(s"Application ${conf.appName} with submission ID $sId finished")
-  } else {
-    logInfo(s"Deployed Spark application ${conf.appName} with submission ID $sId into Kubernetes")
   }
 }
