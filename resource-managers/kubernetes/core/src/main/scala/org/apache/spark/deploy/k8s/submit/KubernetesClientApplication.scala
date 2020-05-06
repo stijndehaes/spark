@@ -22,9 +22,10 @@ import java.util.Properties
 
 import io.fabric8.kubernetes.api.model._
 import io.fabric8.kubernetes.client.KubernetesClient
+import io.fabric8.kubernetes.client.dsl.base.OperationContext
+
 import scala.collection.mutable
 import scala.util.control.NonFatal
-
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.SparkApplication
 import org.apache.spark.deploy.k8s._
@@ -131,7 +132,11 @@ private[spark] class Client(
     // Probably need to make resyncPeriodInMillis configurable see
     // explanation here on what it means:
     // https://groups.google.com/g/kubernetes-sig-api-machinery/c/PbSCXdLDno0?pli=1
-    val podInformer = informers.sharedIndexInformerFor(classOf[Pod], classOf[PodList], 60000)
+    val podInformer = informers.sharedIndexInformerFor(
+      classOf[Pod],
+      classOf[PodList],
+      new OperationContext().withNamespace(conf.namespace).withName(driverPodName),
+      60000)
     podInformer.addEventHandler(watcher)
     informers.startAllRegisteredInformers()
     try {

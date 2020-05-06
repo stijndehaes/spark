@@ -47,18 +47,11 @@ private[k8s] class LoggingPodStatusWatcherImpl(conf: KubernetesDriverConf)
 
   private def phase: String = pod.map(_.getStatus.getPhase).getOrElse("unknown")
 
-  def isDriverPod(pod: Pod): Boolean = {
-    (podName.isDefined && podNamespace.isDefined && pod.getMetadata.getName == podName.get
-      && pod.getMetadata.getNamespace == podNamespace.get)
-  }
-
   def updateStatus(pod: Pod): Unit = {
-    if (isDriverPod(pod)) {
-      this.pod = Some(pod)
-      logLongStatus()
-      if (hasCompleted()) {
-        closeWatch()
-      }
+    this.pod = Some(pod)
+    logLongStatus()
+    if (hasCompleted()) {
+      closeWatch()
     }
   }
 
@@ -71,10 +64,8 @@ private[k8s] class LoggingPodStatusWatcherImpl(conf: KubernetesDriverConf)
   }
 
   def onDelete(pod: Pod, deletedFinalStateUnknown: Boolean): Unit = {
-    if (isDriverPod(pod)) {
-      this.pod = Some(pod)
-      closeWatch()
-    }
+    this.pod = Some(pod)
+    closeWatch()
   }
 
   private def logLongStatus(): Unit = {
