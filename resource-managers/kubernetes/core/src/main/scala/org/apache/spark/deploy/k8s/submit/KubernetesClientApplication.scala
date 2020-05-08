@@ -21,9 +21,11 @@ import java.util.{Collections, UUID}
 import java.util.Properties
 
 import io.fabric8.kubernetes.api.model._
-import io.fabric8.kubernetes.client.KubernetesClient
+import io.fabric8.kubernetes.client.{KubernetesClient, Watch}
+import io.fabric8.kubernetes.client.Watcher.Action
 import scala.collection.mutable
 import scala.util.control.NonFatal
+import util.control.Breaks._
 
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.SparkApplication
@@ -133,30 +135,42 @@ private[spark] class Client(
           .endVolume()
         .endSpec()
       .build()
-    Utils.tryWithResource(
-      kubernetesClient
-        .pods()
-        .withName(resolvedDriverPod.getMetadata.getName)
-        .watch(watcher)) { _ =>
-      val createdDriverPod = kubernetesClient.pods().create(resolvedDriverPod)
-      try {
-        val otherKubernetesResources =
-          resolvedDriverSpec.driverKubernetesResources ++ Seq(configMap)
-        addDriverOwnerReference(createdDriverPod, otherKubernetesResources)
-        kubernetesClient.resourceList(otherKubernetesResources: _*).createOrReplace()
-      } catch {
-        case NonFatal(e) =>
-          kubernetesClient.pods().delete(createdDriverPod)
-          throw e
-      }
+    var watch: Watch = null
+    val createdDriverPod = kubernetesClient.pods().create(resolvedDriverPod)
+    try {
+      val otherKubernetesResources =
+        resolvedDriverSpec.driverKubernetesResources ++ Seq(configMap)
+      addDriverOwnerReference(createdDriverPod, otherKubernetesResources)
+      kubernetesClient.resourceList(otherKubernetesResources: _*).createOrReplace()
+    } catch {
+      case NonFatal(e) =>
+        kubernetesClient.pods().delete(createdDriverPod)
+        throw e
+    }
+    if (waitForAppCompletion) {
+      logInfo(s"Waiting for application $appName to finish...")
+      breakable {
+        while (true) {
+          val podWithName = kubernetesClient
+            .pods()
+            .withName(createdDriverPod.getMetadata.getName)
+          // Reset resource to old before we start the watch, this is important for race conditions
+          watcher.reset()
+          watch = podWithName.watch(watcher)
 
-      if (waitForAppCompletion) {
-        logInfo(s"Waiting for application $appName to finish...")
-        watcher.awaitCompletion()
-        logInfo(s"Application $appName finished.")
-      } else {
-        logInfo(s"Deployed Spark application $appName into Kubernetes.")
+          // Send the latest pod state we know to the watcher to make sure we didn't miss anything
+          watcher.eventReceived(Action.MODIFIED, podWithName.get())
+
+          // Break the while loop if the pod is completed or we don't want to wait
+          if (watcher.awaitCompletion()) {
+            watch.close()
+            break
+          }
+        }
       }
+      logInfo(s"Application $appName finished.")
+    } else {
+      logInfo(s"Deployed Spark application $appName into Kubernetes.")
     }
   }
 

@@ -23,13 +23,15 @@ import scala.collection.JavaConverters._
 import io.fabric8.kubernetes.api.model.{ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, Pod}
 import io.fabric8.kubernetes.client.{KubernetesClientException, Watcher}
 import io.fabric8.kubernetes.client.Watcher.Action
+import java.net.HttpURLConnection.HTTP_GONE
 
 import org.apache.spark.SparkException
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.ThreadUtils
 
 private[k8s] trait LoggingPodStatusWatcher extends Watcher[Pod] {
-  def awaitCompletion(): Unit
+  def awaitCompletion(): Boolean
+  def reset(): Unit
 }
 
 /**
@@ -55,7 +57,13 @@ private[k8s] class LoggingPodStatusWatcherImpl(
 
   private var pod = Option.empty[Pod]
 
+  private var resourceToOldReceived = false
+
   private def phase: String = pod.map(_.getStatus.getPhase).getOrElse("unknown")
+
+  override def reset(): Unit = {
+    resourceToOldReceived = false
+  }
 
   def start(): Unit = {
     maybeLoggingInterval.foreach { interval =>
@@ -69,7 +77,8 @@ private[k8s] class LoggingPodStatusWatcherImpl(
       case Action.DELETED | Action.ERROR =>
         closeWatch()
 
-      case _ =>
+      case a =>
+        logTrace(s"Received action: $a")
         logLongStatus()
         if (hasCompleted()) {
           closeWatch()
@@ -78,8 +87,14 @@ private[k8s] class LoggingPodStatusWatcherImpl(
   }
 
   override def onClose(e: KubernetesClientException): Unit = {
-    logDebug(s"Stopping watching application $appId with last-observed phase $phase")
-    closeWatch()
+    if (e != null && e.getCode == HTTP_GONE) {
+      resourceToOldReceived = true
+      podCompletedFuture.countDown()
+      logDebug(s"Got HTTP Gone code, resource version changed in k8s api: $e")
+    } else {
+      logDebug(s"Stopping watching application $appId with last-observed phase $phase")
+      closeWatch()
+    }
   }
 
   private def logShortStatus() = {
@@ -134,11 +149,15 @@ private[k8s] class LoggingPodStatusWatcherImpl(
     }.mkString("")
   }
 
-  override def awaitCompletion(): Unit = {
+  override def awaitCompletion(): Boolean = {
     podCompletedFuture.await()
+    if (resourceToOldReceived) {
+      return false
+    }
     logInfo(pod.map { p =>
       s"Container final statuses:\n\n${containersDescription(p)}"
     }.getOrElse("No containers were found in the driver pod."))
+    true
   }
 
   private def containersDescription(p: Pod): String = {
