@@ -19,11 +19,11 @@ package org.apache.spark.deploy.k8s.submit
 import io.fabric8.kubernetes.api.model._
 import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.dsl.PodResource
+import io.fabric8.kubernetes.client.dsl.base.OperationContext
 import io.fabric8.kubernetes.client.informers.{SharedIndexInformer, SharedInformerFactory}
 import org.mockito.{ArgumentCaptor, Mock, MockitoAnnotations}
 import org.mockito.Mockito.{verify, when}
 import org.scalatest.BeforeAndAfter
-
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.deploy.k8s._
 import org.apache.spark.deploy.k8s.Constants._
@@ -142,7 +142,9 @@ class ClientSuite extends SparkFunSuite with BeforeAndAfter {
     createdResourcesArgumentCaptor = ArgumentCaptor.forClass(classOf[HasMetadata])
     when(podOperations.create(FULL_EXPECTED_POD)).thenReturn(POD_WITH_OWNER_REFERENCE)
     when(kubernetesClient.informers()).thenReturn(sharedInformerFactory)
-    when(sharedInformerFactory.sharedIndexInformerFor(classOf[Pod], classOf[PodList], 60000))
+    when(sharedInformerFactory.sharedIndexInformerFor(
+      classOf[Pod], classOf[PodList],
+      new OperationContext().withNamespace(kconf.namespace).withName(POD_NAME), 60000))
       .thenReturn(podInformer)
     doReturn(resourceList)
       .when(kubernetesClient)
